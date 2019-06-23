@@ -1,0 +1,12 @@
+[package]
+name = "leaf_zone"
+version = "0.1.0"
+authors = ["jtuu <joona.tuukkanen@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+piston_window = "0.98.*"
+bitflags = "1.1.*"
+rand = "0.6.*"
+num-traits = "0.2.*"
+delaunator = "0.2.*"
