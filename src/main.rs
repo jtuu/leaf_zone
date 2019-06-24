@@ -16,7 +16,7 @@ const WHITE: types::Color = [1.0, 1.0, 1.0, 1.0];
 const BLACK: types::Color = [0.0, 0.0, 0.0, 1.0];
 const PURPLE: types::Color = [1.0, 0.0, 1.0, 1.0];
 
-const TILE_SIZE: f64 = 10.0;
+const TILE_SIZE: f64 = 5.0;
 
 fn main() {
     let mut window: PistonWindow = WindowSettings::new("Hello", [640, 480])
@@ -25,10 +25,6 @@ fn main() {
                                                   .build().unwrap();
     let map_width = 100;
     let map_height = 100;
-    let draw_size = window.draw_size();
-    // for centering
-    let offset_left = draw_size.width / 2.0 - (map_width as f64 * TILE_SIZE) / 2.0;
-    let offset_top = draw_size.height / 2.0 - (map_height as f64 * TILE_SIZE) / 2.0;
     // generate map
     let mut gen = MapGenerator::new(map_width, map_height);
     gen.fill(TileKind::Floor);
@@ -40,7 +36,9 @@ fn main() {
         match event {
             Event::Loop(loop_event) => {
                 match loop_event {
-                    Loop::Render(_args) => {
+                    Loop::Render(RenderArgs{ext_dt: _, window_size, draw_size: _}) => {
+                        let offset_left = (window_size[0] as f64 / 2.0 - (map_width as f64 * TILE_SIZE) / 2.0).floor();
+                        let offset_top = (window_size[1] as f64 / 2.0 - (map_height as f64 * TILE_SIZE) / 2.0).floor();
                         // render when render event is received
                         window.draw_2d(&event, |ctx, gfx, _dev| {
                             clear(WHITE, gfx);
@@ -53,9 +51,9 @@ fn main() {
                                         TileKind::Wall => BLACK,
                                         _ => PURPLE
                                     };
-                                    rect[0] = x as f64 * TILE_SIZE + offset_left;
-                                    rect[1] = y as f64 * TILE_SIZE + offset_top;
-                                    rectangle(color, rect, ctx.transform, gfx);
+                                    rect[0] = x as f64 * TILE_SIZE;
+                                    rect[1] = y as f64 * TILE_SIZE;
+                                    rectangle(color, rect, ctx.transform.trans_pos([offset_left, offset_top]), gfx);
                                 }
                             }
                         });

@@ -385,7 +385,6 @@ impl MapGenerator {
             _ => {
                 // create mst from triangulation
                 let delaunay = delaunator::triangulate(&connection_points);
-                let mst = Node::new();
                 None
             }
         };
