@@ -1,10 +1,10 @@
 use std::cmp;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque, BinaryHeap};
 use std::ops::*;
 use rand::prelude::*;
 use num_traits::*;
 
-fn abs<T: Signed + Zero + Ord>(n: T) -> T {
+fn abs<T: Signed + Zero + PartialOrd>(n: T) -> T {
     if n < T::zero() {
         T::zero() - n
     } else {
@@ -12,7 +12,7 @@ fn abs<T: Signed + Zero + Ord>(n: T) -> T {
     }
 }
 
-fn manhattan_distance<T: Signed + Zero + Ord>(ax: T, ay: T, bx: T, by: T) -> T {
+pub fn manhattan_distance<T: Signed + Zero + PartialOrd>(ax: T, ay: T, bx: T, by: T) -> T {
     return abs(ax - bx) + abs(ay - by);
 }
 
@@ -38,9 +38,9 @@ impl Iterator for DirectionalRange {
 
 fn range(from: isize, to: isize) -> DirectionalRange {
     if to < from {
-        DirectionalRange::Backwards((to .. from).rev())
+        DirectionalRange::Backwards((to .. (from + 1)).rev())
     } else {
-        DirectionalRange::Forwards(from .. to)
+        DirectionalRange::Forwards(from .. (to + 1))
     }
 }
 
@@ -68,21 +68,82 @@ impl From<&Vec2> for delaunator::Point {
     }
 }
 
-struct Node<T> {
-    value: T,
-    children: Vec<Node<T>>
+#[derive(Copy, Clone, Eq, PartialEq)]
+struct Edge {
+    pub p: usize,
+    pub q: usize,
+    pub weight: isize
 }
 
-impl<T> Node<T> {
-    fn new(value: T) -> Node<T> {
-        Node {
-            value,
-            children: Vec::new()
+impl Edge {
+    fn new(p: usize, q: usize, points: &[delaunator::Point]) -> Edge {
+        let weight = {
+            let p = &points[p];
+            let q = &points[q];
+            (manhattan_distance(p.x, p.y, q.x, q.y) * 10.0) as isize
+        };
+        Edge {
+            p, q,
+            weight
         }
     }
+}
 
-    fn add_child(&mut self, value: T) {
-        self.children.push(Node::new(value));
+impl Ord for Edge {
+    fn cmp(&self, other: &Edge) -> cmp::Ordering {
+        return other.weight.cmp(&self.weight);
+    }
+}
+
+impl PartialOrd for Edge {
+    fn partial_cmp(&self, other: &Edge) -> Option<cmp::Ordering> {
+        return Some(self.cmp(other));
+    }
+}
+
+trait DelaunayExtension {
+    fn get_point_edges(&self, points: &[delaunator::Point], point_idx: usize) -> Vec<Edge>;
+}
+
+impl DelaunayExtension for delaunator::Triangulation {
+    // get halfedges and also hull edges
+    fn get_point_edges(&self, points: &[delaunator::Point], point_idx: usize) -> Vec<Edge> {
+        let mut edges = self.halfedges.as_slice().into_iter()
+            .filter_map(|e| {
+                let e = *e;
+                if e != delaunator::EMPTY && self.triangles[e] == point_idx {
+                    let p_i = self.triangles[e];
+                    let q_i = self.triangles[delaunator::next_halfedge(e)];
+                    return Some(Edge::new(p_i, q_i, points));
+                }
+                return None;
+            })
+            .collect::<Vec<Edge>>();
+
+        let mut hull_i = None;
+        for i in 0 .. self.hull.len() {
+            if self.hull[i] == point_idx {
+                hull_i = Some(i);
+                break
+            }
+        }
+
+        if let Some(hull_i) = hull_i {
+            let left_i = if hull_i == 0 {
+                self.hull.len() - 1
+            } else {
+                hull_i - 1
+            };
+            let right_i = if hull_i == self.hull.len() - 1 {
+                0
+            } else {
+                hull_i + 1
+            };
+            edges.push(Edge::new(hull_i, left_i, points));
+            edges.push(Edge::new(hull_i, right_i, points));
+        }
+
+        return edges;
     }
 }
 
@@ -272,7 +333,7 @@ impl MapGenerator {
             dx = -dx;
         }
 
-        let mut d = dy * 2 - dx;
+        let mut d = dx * 2 - dy;
         let mut x = from.x;
         
         for y in range(from.y, to.y) {
@@ -296,9 +357,9 @@ impl MapGenerator {
             }
         } else {
             if from.y > to.y {
-                self.line_helper_high(from, to, value);
-            } else {
                 self.line_helper_high(to, from, value);
+            } else {
+                self.line_helper_high(from, to, value);
             }
         }
     }
@@ -370,36 +431,62 @@ impl MapGenerator {
             return delaunator::Point::from(&rand_tile);
         }).collect();
 
-        // minimum spanning tree of areas
-        let mst: Option<Node<Vec2>> = match connection_points.len() {
+        // connect areas
+        match connection_points.len() {
             0 | 1 => {
                 // nothing to connect
-                None
             },
             2 => {
                 // the graph of two points is the mst
-                let mut root = Node::new(Vec2::from(&connection_points[0]));
-                root.add_child(Vec2::from(&connection_points[1]));
-                Some(root)
+                self.line(
+                    Vec2::from(&connection_points[0]),
+                    Vec2::from(&connection_points[1]),
+                    connect_kind);
             },
             _ => {
-                // create mst from triangulation
-                let delaunay = delaunator::triangulate(&connection_points);
-                None
-            }
-        };
+                // create mst from triangulation using prim's algorithm
+                let delaunay = delaunator::triangulate(&connection_points).unwrap();
+                let mut edge_queue: BinaryHeap<Edge> = BinaryHeap::new();
+                let mut explored: HashSet<usize> = HashSet::new();
 
-        // connect areas
-        if let Some(mst) = mst {
-            let mut frontier: VecDeque<Node<Vec2>> = VecDeque::new();
-            frontier.push_front(mst);
+                let mut start = 0;
 
-            while frontier.len() > 0 {
-                let cur = frontier.pop_front().unwrap();
+                for p in 0 .. connection_points.len() {
+                    start = p;
+                    let mut edges = delaunay.get_point_edges(&connection_points, p);
+                    if !edges.is_empty() {
+                        for edge in edges.drain(..) {
+                            edge_queue.push(edge);
+                        }
+                        break;
+                    }
+                }
 
-                for next in cur.children {
-                    self.line(cur.value, next.value, connect_kind);
-                    frontier.push_front(next);
+                explored.insert(start);
+
+                let mut min_edge = edge_queue.pop().unwrap();
+
+                loop {
+                    while !edge_queue.is_empty() && explored.contains(&min_edge.q) {
+                        min_edge = edge_queue.pop().unwrap();
+                    }
+                    let next_node = min_edge.q;
+
+                    if !explored.contains(&next_node) {
+                        self.line(Vec2::from(&connection_points[min_edge.p]),
+                                  Vec2::from(&connection_points[min_edge.q]),
+                                  connect_kind);
+
+                        for edge in delaunay.get_point_edges(&connection_points, next_node).drain(..) {
+                            edge_queue.push(edge);
+                        }
+                    }
+
+                    explored.insert(next_node);
+
+                    if edge_queue.is_empty() {
+                        break;
+                    }
                 }
             }
         }
@@ -444,7 +531,7 @@ impl MapGenerator {
         let caves: Vec<Vec<Vec2>> = self.find_areas(TileKind::Floor)
             .into_iter()
             .filter(|tile_positions| {
-                if tile_positions.len() < 100 {
+                if tile_positions.len() < 10 {
                     for pos in tile_positions {
                         self.set_tile(pos.x, pos.y, TileKind::Wall);
                     }
