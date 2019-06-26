@@ -1,6 +1,7 @@
 use std::cmp;
 use std::collections::{HashSet, VecDeque, BinaryHeap};
 use std::ops::*;
+use std::time;
 use rand::prelude::*;
 use num_traits::*;
 
@@ -48,6 +49,18 @@ fn range(from: isize, to: isize) -> DirectionalRange {
 struct Vec2 {
     x: isize,
     y: isize
+}
+
+impl Ord for Vec2 {
+    fn cmp(&self, other: &Vec2) -> cmp::Ordering {
+        return self.x.cmp(&other.x).then(self.y.cmp(&other.y));
+    }
+}
+
+impl PartialOrd for Vec2 {
+    fn partial_cmp(&self, other: &Vec2) -> Option<cmp::Ordering> {
+        return Some(self.cmp(other));
+    }
 }
 
 impl From<&delaunator::Point> for Vec2 {
@@ -139,8 +152,8 @@ impl DelaunayExtension for delaunator::Triangulation {
             } else {
                 hull_i + 1
             };
-            edges.push(Edge::new(hull_i, left_i, points));
-            edges.push(Edge::new(hull_i, right_i, points));
+            edges.push(Edge::new(self.hull[hull_i], self.hull[left_i], points));
+            edges.push(Edge::new(self.hull[hull_i], self.hull[right_i], points));
         }
 
         return edges;
@@ -149,25 +162,32 @@ impl DelaunayExtension for delaunator::Triangulation {
 
 bitflags! {
     pub struct TileKind: u8 {
-        const Floor = 0;
-        const Wall = 1;
+        const Floor = 0b00000001;
+        const Wall = 0b00000010;
+        const FloorWall = Self::Floor.bits | Self::Wall.bits;
+        const Highlight = 0b10000000;
+        const FloorHighlight = Self::Floor.bits | Self::Highlight.bits;
+        const WallHighlight = Self::Wall.bits | Self::Highlight.bits;
+        const FloorWallHighlight = Self::Floor.bits | Self::Wall.bits | Self::Highlight.bits;
     }
 }
 
 pub struct MapGenerator {
     width: isize,
     height: isize,
-    rng: ThreadRng,
+    rng: StdRng,
     tiles: Vec<TileKind>,
     swap_tiles: Vec<TileKind>
 }
 
 impl MapGenerator {
     pub fn new(width: usize, height: usize) -> MapGenerator {
+        let seed = time::SystemTime::now().duration_since(time::SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        println!("Map seed: {}", seed);
         MapGenerator {
             width: width as isize,
             height: height as isize,
-            rng: rand::thread_rng(),
+            rng: rand::SeedableRng::seed_from_u64(seed),
             tiles: vec![TileKind::Floor; width * height],
             swap_tiles: Vec::new()
         }
@@ -192,6 +212,11 @@ impl MapGenerator {
     fn set_tile<T: NumCast>(&mut self, x: T, y: T, value: TileKind) {
         let i = self.get_index(x, y);
         self.tiles[i] = value;
+    }
+
+    fn orset_tile<T: NumCast>(&mut self, x: T, y: T, value: TileKind) {
+        let i = self.get_index(x, y);
+        self.tiles[i] |= value;
     }
 
     fn center_weighed_noise(&mut self, edge_freq: f64, center_freq: f64, value: TileKind) {
@@ -312,7 +337,7 @@ impl MapGenerator {
         let mut y = from.y;
         
         for x in range(from.x, to.x) {
-            self.set_tile(x, y, value);
+            self.orset_tile(x, y, value);
 
             if d > 0 {
                 y += yi;
@@ -337,7 +362,7 @@ impl MapGenerator {
         let mut x = from.x;
         
         for y in range(from.y, to.y) {
-            self.set_tile(x, y, value);
+            self.orset_tile(x, y, value);
 
             if d > 0 {
                 x += xi;
@@ -406,7 +431,8 @@ impl MapGenerator {
                 // check if tile hasn't been flagged yet
                 if self.tiles[i] == find_kind && tile_flags[i] == unflagged {
                     // flag area
-                    let area_tiles = self.floodfill(x, y, find_kind);
+                    let mut area_tiles = self.floodfill(x, y, find_kind);
+                    area_tiles.sort();
 
                     // copy flags
                     for pos in &area_tiles {
@@ -418,6 +444,8 @@ impl MapGenerator {
                 area_counter += 1;
             }
         }
+
+        areas.sort();
 
         return areas;
     }
@@ -466,10 +494,11 @@ impl MapGenerator {
 
                 let mut min_edge = edge_queue.pop().unwrap();
 
-                loop {
+                while !edge_queue.is_empty() {
                     while !edge_queue.is_empty() && explored.contains(&min_edge.q) {
                         min_edge = edge_queue.pop().unwrap();
                     }
+
                     let next_node = min_edge.q;
 
                     if !explored.contains(&next_node) {
@@ -483,10 +512,15 @@ impl MapGenerator {
                     }
 
                     explored.insert(next_node);
+                }
 
-                    if edge_queue.is_empty() {
-                        break;
-                    }
+                for i in (0 .. delaunay.triangles.len()).step_by(3) {
+                    let p0 = Vec2::from(&connection_points[delaunay.triangles[i + 0]]);
+                    let p1 = Vec2::from(&connection_points[delaunay.triangles[i + 1]]);
+                    let p2 = Vec2::from(&connection_points[delaunay.triangles[i + 2]]);
+                    self.line(p0, p1, TileKind::Highlight);
+                    self.line(p1, p2, TileKind::Highlight);
+                    self.line(p2, p0, TileKind::Highlight);
                 }
             }
         }
@@ -499,7 +533,7 @@ impl MapGenerator {
         self.center_weighed_noise(0.8, 0.4, TileKind::Wall);
 
         // smooths the noise into cavern-like shapes
-        self.cellular_automaton(3, |self2, x, y| {
+        self.cellular_automaton(4, |self2, x, y| {
             let cur_state = self2.tiles[self2.get_index(x, y)];
             let num_wall = self2.count_neighbors_eq(x, y, 1, TileKind::Wall);
             
@@ -531,7 +565,7 @@ impl MapGenerator {
         let caves: Vec<Vec<Vec2>> = self.find_areas(TileKind::Floor)
             .into_iter()
             .filter(|tile_positions| {
-                if tile_positions.len() < 10 {
+                if tile_positions.len() < 50 {
                     for pos in tile_positions {
                         self.set_tile(pos.x, pos.y, TileKind::Wall);
                     }

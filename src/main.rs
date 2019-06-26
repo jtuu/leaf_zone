@@ -12,8 +12,10 @@ use piston_window::*;
 mod map_gen;
 use map_gen::*;
 
-const WHITE: types::Color = [1.0, 1.0, 1.0, 1.0];
-const BLACK: types::Color = [0.0, 0.0, 0.0, 1.0];
+const WHITE: types::Color  = [1.0, 1.0, 1.0, 1.0];
+const BLACK: types::Color  = [0.0, 0.0, 0.0, 1.0];
+const RED: types::Color    = [1.0, 0.0, 0.0, 1.0];
+const GREEN: types::Color  = [0.0, 1.0, 0.0, 1.0];
 const PURPLE: types::Color = [1.0, 0.0, 1.0, 1.0];
 
 const TILE_SIZE: f64 = 5.0;
@@ -31,6 +33,7 @@ fn main() {
     gen.caverns();
     // this tile is reused for all tiles
     let mut rect: [f64; 4] = [0.0, 0.0, TILE_SIZE, TILE_SIZE];
+    let mut highlight_enabled = false;
     // event loop
     while let Some(event) = window.next() {
         match event {
@@ -46,10 +49,26 @@ fn main() {
                             for x in 0..map_width {
                                 for y in 0..map_height {
                                     let tile = gen.get_tile(x, y);
-                                    let color: types::Color = match tile {
-                                        TileKind::Floor => WHITE,
-                                        TileKind::Wall => BLACK,
-                                        _ => PURPLE
+                                    let color: types::Color = if highlight_enabled {
+                                        match tile {
+                                            TileKind::Floor => WHITE,
+                                            TileKind::Wall => BLACK,
+                                            TileKind::FloorWall => WHITE,
+                                            TileKind::FloorHighlight => RED,
+                                            TileKind::WallHighlight => GREEN,
+                                            TileKind::FloorWallHighlight => RED,
+                                            _ => PURPLE
+                                        }
+                                    } else {
+                                        match tile {
+                                            TileKind::Floor => WHITE,
+                                            TileKind::Wall => BLACK,
+                                            TileKind::FloorWall => WHITE,
+                                            TileKind::FloorHighlight => WHITE,
+                                            TileKind::WallHighlight => BLACK,
+                                            TileKind::FloorWallHighlight => WHITE,
+                                            _ => PURPLE
+                                        }
                                     };
                                     rect[0] = x as f64 * TILE_SIZE;
                                     rect[1] = y as f64 * TILE_SIZE;
@@ -66,10 +85,18 @@ fn main() {
                     Input::Button(ButtonArgs{state, button, scancode: _}) => {
                         match button {
                             Button::Mouse(mouse_button) => {
-                                // regenerate map on click
-                                if mouse_button == MouseButton::Left && state == ButtonState::Press {
-                                    gen.fill(TileKind::Floor);
-                                    gen.caverns();
+                                if state == ButtonState::Press {
+                                    match mouse_button {
+                                        // regenerate map on click
+                                        MouseButton::Left => {
+                                            gen.fill(TileKind::Floor);
+                                            gen.caverns();
+                                        },
+                                        MouseButton::Right => {
+                                            highlight_enabled = !highlight_enabled;
+                                        },
+                                        _ => {}
+                                    }
                                 }
                             },
                             _ => {}
