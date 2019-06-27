@@ -1,5 +1,5 @@
 use std::cmp;
-use std::collections::{HashSet, VecDeque, BinaryHeap};
+use std::collections::{HashSet, VecDeque, BinaryHeap, HashMap};
 use std::ops::*;
 use std::time;
 use rand::prelude::*;
@@ -51,6 +51,12 @@ struct Vec2 {
     y: isize
 }
 
+impl Vec2 {
+    fn new(x: isize, y: isize) -> Vec2 {
+        return Vec2 { x, y };
+    }
+}
+
 impl Ord for Vec2 {
     fn cmp(&self, other: &Vec2) -> cmp::Ordering {
         return self.x.cmp(&other.x).then(self.y.cmp(&other.y));
@@ -60,6 +66,45 @@ impl Ord for Vec2 {
 impl PartialOrd for Vec2 {
     fn partial_cmp(&self, other: &Vec2) -> Option<cmp::Ordering> {
         return Some(self.cmp(other));
+    }
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+struct WeightedVec2 {
+    x: isize,
+    y: isize,
+    weight: isize
+}
+
+impl WeightedVec2 {
+    fn from_weightless(vec: Vec2, weight: isize) -> WeightedVec2 {
+        return WeightedVec2 {
+            x: vec.x,
+            y: vec.y,
+            weight
+        };
+    }
+
+    fn without_weight(&self) -> Vec2 {
+        return Vec2::new(self.x, self.y);
+    }
+}
+
+impl Ord for WeightedVec2 {
+    fn cmp(&self, other: &WeightedVec2) -> cmp::Ordering {
+        return other.weight.cmp(&self.weight);
+    }
+}
+
+impl PartialOrd for WeightedVec2 {
+    fn partial_cmp(&self, other: &WeightedVec2) -> Option<cmp::Ordering> {
+        return Some(self.cmp(other));
+    }
+}
+
+impl PartialEq<Vec2> for WeightedVec2 {
+    fn eq(&self, other: &Vec2) -> bool {
+        return self.x == other.x && self.y == other.y;
     }
 }
 
@@ -83,9 +128,9 @@ impl From<&Vec2> for delaunator::Point {
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 struct Edge {
-    pub p: usize,
-    pub q: usize,
-    pub weight: isize
+    p: usize,
+    q: usize,
+    weight: isize
 }
 
 impl Edge {
@@ -195,6 +240,11 @@ impl MapGenerator {
 
     pub fn get_dimensions(&self) -> (isize, isize) {
         return (self.width, self.height);
+    }
+
+    fn within_bounds(&self, vec: &Vec2) -> bool {
+        return vec.x >= 0 && vec.x < self.width &&
+               vec.y >= 0 && vec.y < self.height;
     }
 
     fn get_index<T: NumCast>(&self, x: T, y: T) -> usize {
@@ -389,6 +439,50 @@ impl MapGenerator {
         }
     }
 
+    fn a_star(&mut self, from: Vec2, to: Vec2, path_kind: TileKind, weights: &mut [isize], weight_update: isize) {
+        let mut frontier: BinaryHeap<WeightedVec2> = BinaryHeap::new();
+        let mut costs: HashMap<Vec2, isize> = HashMap::new();
+        let mut came_from: HashMap<Vec2, Vec2> = HashMap::new();
+
+        frontier.push(WeightedVec2::from_weightless(from, 0));
+        costs.insert(from, 0);
+        
+        while !frontier.is_empty() {
+            let cur = frontier.pop().unwrap().without_weight();
+            
+            if cur ==  to {
+                break;
+            }
+
+            self.receive_neighbor_positions(cur.x, cur.y, 1, |next| {
+                if self.within_bounds(&next) && !costs.contains_key(&next) {
+                    let cur_cost = costs.get(&cur).unwrap();
+                    let next_cost = cur_cost +
+                                    weights[self.get_index(next.x, next.y)] +
+                                    manhattan_distance(next.x, next.y, to.x, to.y);
+
+                    frontier.push(WeightedVec2::from_weightless(next, next_cost));
+                    
+                    came_from.insert(next, cur);
+                    costs.insert(next, next_cost);
+                }
+            });
+        }
+
+        {
+            let mut cur = to;
+            let i = self.get_index(cur.x, cur.y);
+            self.tiles[i] = path_kind;
+            weights[i] = weight_update;
+            while came_from.contains_key(&cur) {
+                cur = *came_from.get(&cur).unwrap();
+                let i = self.get_index(cur.x, cur.y);
+                self.tiles[i] = path_kind;
+                weights[i] = weight_update;
+            }
+        }
+    }
+
     pub fn fill(&mut self, value: TileKind) {
         for i in 0 .. self.tiles.len() {
             self.tiles[i] = value;
@@ -450,38 +544,53 @@ impl MapGenerator {
         return areas;
     }
 
-    fn connect_areas<T>(&mut self, areas: &[T], connect_kind: TileKind)
+    fn connect_areas<T>(&mut self, areas: &[T], connect_kind: TileKind, base_weights: &[isize])
         where T: AsRef<[Vec2]>
     {
-        let connection_points: Vec<delaunator::Point> = areas.into_iter().map(|asref| {
-            let tile_positions = asref.as_ref();
+        const low_weight: isize = 1;
+        const high_weight: isize = 5;
+        let mut weights = Vec::from(base_weights);
+
+        let mut connection_points_i: Vec<Vec2> = Vec::with_capacity(areas.len());
+        let mut connection_points_f: Vec<delaunator::Point> = Vec::with_capacity(areas.len());
+        // pick random points and also set low weights for all areas
+        for area in areas {
+            let tile_positions = area.as_ref();
+
             let rand_tile = tile_positions[self.rng.gen_range(0, tile_positions.len())];
-            return delaunator::Point::from(&rand_tile);
-        }).collect();
+            connection_points_i.push(rand_tile);
+            connection_points_f.push(delaunator::Point::from(&rand_tile));
+
+            for pos in tile_positions {
+                weights[self.get_index(pos.x, pos.y)] = low_weight;
+            }
+        }
 
         // connect areas
-        match connection_points.len() {
+        match areas.len() {
             0 | 1 => {
                 // nothing to connect
             },
             2 => {
                 // the graph of two points is the mst
-                self.line(
-                    Vec2::from(&connection_points[0]),
-                    Vec2::from(&connection_points[1]),
-                    connect_kind);
+                self.a_star(
+                    connection_points_i[0],
+                    connection_points_i[1],
+                    connect_kind,
+                    &mut weights,
+                    low_weight);
             },
             _ => {
                 // create mst from triangulation using prim's algorithm
-                let delaunay = delaunator::triangulate(&connection_points).unwrap();
+                let delaunay = delaunator::triangulate(&connection_points_f).unwrap();
                 let mut edge_queue: BinaryHeap<Edge> = BinaryHeap::new();
                 let mut explored: HashSet<usize> = HashSet::new();
 
                 let mut start = 0;
 
-                for p in 0 .. connection_points.len() {
+                for p in 0 .. connection_points_f.len() {
                     start = p;
-                    let mut edges = delaunay.get_point_edges(&connection_points, p);
+                    let mut edges = delaunay.get_point_edges(&connection_points_f, p);
                     if !edges.is_empty() {
                         for edge in edges.drain(..) {
                             edge_queue.push(edge);
@@ -502,11 +611,14 @@ impl MapGenerator {
                     let next_node = min_edge.q;
 
                     if !explored.contains(&next_node) {
-                        self.line(Vec2::from(&connection_points[min_edge.p]),
-                                  Vec2::from(&connection_points[min_edge.q]),
-                                  connect_kind);
+                        // connect
+                        self.a_star(connection_points_i[min_edge.p],
+                                    connection_points_i[min_edge.q],
+                                    connect_kind,
+                                    &mut weights,
+                                    low_weight);
 
-                        for edge in delaunay.get_point_edges(&connection_points, next_node).drain(..) {
+                        for edge in delaunay.get_point_edges(&connection_points_f, next_node).drain(..) {
                             edge_queue.push(edge);
                         }
                     }
@@ -514,10 +626,11 @@ impl MapGenerator {
                     explored.insert(next_node);
                 }
 
+                // highlight for debugging
                 for i in (0 .. delaunay.triangles.len()).step_by(3) {
-                    let p0 = Vec2::from(&connection_points[delaunay.triangles[i + 0]]);
-                    let p1 = Vec2::from(&connection_points[delaunay.triangles[i + 1]]);
-                    let p2 = Vec2::from(&connection_points[delaunay.triangles[i + 2]]);
+                    let p0 = connection_points_i[delaunay.triangles[i + 0]];
+                    let p1 = connection_points_i[delaunay.triangles[i + 1]];
+                    let p2 = connection_points_i[delaunay.triangles[i + 2]];
                     self.line(p0, p1, TileKind::Highlight);
                     self.line(p1, p2, TileKind::Highlight);
                     self.line(p2, p0, TileKind::Highlight);
@@ -562,20 +675,25 @@ impl MapGenerator {
         }
         
         // turn too small caves into wall
-        let caves: Vec<Vec<Vec2>> = self.find_areas(TileKind::Floor)
-            .into_iter()
+        let temp = self.find_areas(TileKind::Floor);
+        let caves: Vec<_> = temp
+            .iter()
             .filter(|tile_positions| {
-                if tile_positions.len() < 50 {
-                    for pos in tile_positions {
+                // remove too small
+                if tile_positions.len() < 30 {
+                    for pos in tile_positions.iter() {
                         self.set_tile(pos.x, pos.y, TileKind::Wall);
                     }
                     return false;
                 }
+
                 return true;
             })
             .collect();
 
+        let mut weights: Vec<isize> = Vec::new();
+        weights.resize(self.tiles.len(), 10);
         // connect caves
-        self.connect_areas(&caves, TileKind::Floor);
+        self.connect_areas(&caves, TileKind::Floor, &weights);
     }
 }
